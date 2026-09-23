@@ -18,6 +18,86 @@ const escapeRegExp = (string: string) => {
   return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 };
 
+// Line-start ``` / ~~~ fences, also behind `>` prefixes; unclosed fences run to the end.
+const BLOCKQUOTE_PREFIX_RE = /^((?: {0,3}>[ \t]?)*)( {0,3})(`{3,}|~{3,})(.*)$/;
+const splitFenceAwareLines = (text: string) => {
+  let fenceChar = '';
+  let fencePrefix = '';
+  let closeRe: RegExp | null = null;
+  const parts = text.split(/(\r\n|\n)/);
+  const out: { line: string; sep: string; code: boolean }[] = [];
+  for (let i = 0; i < parts.length; i += 2) {
+    const line = parts[i];
+    // Closes when the blockquote prefix isn't continued.
+    if (fenceChar && fencePrefix && !line.startsWith(fencePrefix)) {
+      fenceChar = '';
+      closeRe = null;
+    }
+    let code = !!fenceChar;
+    if (fenceChar) {
+      if (
+        line.startsWith(fencePrefix) &&
+        closeRe!.test(line.slice(fencePrefix.length))
+      ) {
+        fenceChar = '';
+        closeRe = null;
+      }
+    } else {
+      const m = BLOCKQUOTE_PREFIX_RE.exec(line);
+      if (m && !(m[3][0] === '`' && m[4].includes('`'))) {
+        fencePrefix = m[1];
+        fenceChar = m[3][0];
+        closeRe = new RegExp(`^ {0,3}\\${fenceChar}{${m[3].length},} *$`);
+        code = true;
+      }
+    }
+    out.push({ line, sep: parts[i + 1] || '', code });
+  }
+  return out;
+};
+
+// Hand-rolled scan instead of lookbehind regex: unsupported on Safari < 16.4.
+const splitInlineCode = (line: string) => {
+  const segments: { text: string; code: boolean }[] = [];
+  let start = 0;
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] === '`' && line[i - 1] !== '\\') {
+      let j = i;
+      while (line[j] === '`') j++;
+      const openLen = j - i;
+      let k = j;
+      let close = -1;
+      while (k < line.length) {
+        if (line[k] !== '`') {
+          k++;
+          continue;
+        }
+        let m = k;
+        while (line[m] === '`') m++;
+        if (m - k === openLen) {
+          close = m;
+          break;
+        }
+        k = m;
+      }
+      if (close !== -1) {
+        if (start < i)
+          segments.push({ text: line.slice(start, i), code: false });
+        segments.push({ text: line.slice(i, close), code: true });
+        i = start = close;
+        continue;
+      }
+      i = j;
+      continue;
+    }
+    i++;
+  }
+  if (start < line.length)
+    segments.push({ text: line.slice(start), code: false });
+  return segments;
+};
+
 export const prepareContent = ({
   elements,
   content,
@@ -44,8 +124,8 @@ export const prepareContent = ({
   );
   const refElements: IMessageElement[] = [];
 
-  if (elementRegexp) {
-    preparedContent = preparedContent.replaceAll(elementRegexp, (match) => {
+  const linkNames = (text: string) =>
+    text.replaceAll(elementRegexp!, (match) => {
       const element = elements.find((e) => {
         const nameMatch = e.name === match;
         const scopeMatch = isForIdMatch(id, e?.forId);
@@ -71,6 +151,19 @@ export const prepareContent = ({
         return `[${match}](${toSafeLinkTarget(match)})`;
       }
     });
+
+  // A `language` wrap below turns the whole content into a code block, so skip linking then.
+  if (elementRegexp && preparedContent && !language) {
+    preparedContent = splitFenceAwareLines(preparedContent)
+      .map(({ line, sep, code }) => {
+        const linked = code
+          ? line
+          : splitInlineCode(line)
+              .map((s) => (s.code ? s.text : linkNames(s.text)))
+              .join('');
+        return linked + sep;
+      })
+      .join('');
   }
 
   if (language && preparedContent) {
