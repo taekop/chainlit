@@ -106,3 +106,18 @@ it('closes a blockquoted fence on a line without the quote prefix', () => {
     '> a\n> ```\n[source_1](source_1) no-prefix\n> ```\n[source_12](source_12)'
   );
 });
+
+it('keeps a bare `>` line inside a blockquoted fence as code', () => {
+  const content = '> ```\n>\n> source_1\n> ```';
+  expect(prepare(content)).toBe(content);
+});
+
+it('treats an even backslash run before a backtick as unescaped (code)', () => {
+  const content = 'see \\\\`source_1\\\\` here';
+  expect(prepare(content)).toBe(content);
+});
+
+it('treats an odd backslash run before a backtick as escaped (not code)', () => {
+  const content = 'see \\`source_1\\` here';
+  expect(prepare(content)).toBe('see \\`[source_1](source_1)\\` here');
+});
